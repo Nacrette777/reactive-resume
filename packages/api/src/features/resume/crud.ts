@@ -1,3 +1,6 @@
+import type { ResumeData } from "@reactive-resume/schema/resume/data";
+import { ORPCError } from "@orpc/server";
+import { parseJSONResume } from "@reactive-resume/import/json-resume";
 import { generateId, generateRandomName, slugify } from "@reactive-resume/utils/string";
 import { protectedProcedure } from "../../context";
 import { resumeDto } from "../../dto/resume";
@@ -123,6 +126,71 @@ export const crudRouter = {
 			});
 
 			return id;
+		}),
+
+	importJsonResume: protectedProcedure
+		.route({
+			method: "POST",
+			path: "/resumes/import/json-resume",
+			tags: ["Resumes"],
+			operationId: "importJsonResume",
+			summary: "Import a JSON Resume document",
+			description:
+				"Creates a new resume from a standard JSON Resume document, converted on the server with the same importer the web app uses. The caller supplies a requestId: retrying with the same requestId returns the resume created by the first call instead of creating another one. Returns the ID of the resume and whether this call created it. Requires authentication.",
+			successDescription: "The ID of the imported resume and whether this call created it.",
+		})
+		.input(resumeDto.importJsonResume.input)
+		.use(resumeMutationRateLimit)
+		.output(resumeDto.importJsonResume.output)
+		.errors({
+			INVALID_JSON_RESUME: {
+				message: "The document could not be read as a valid JSON Resume.",
+				status: 400,
+			},
+		})
+		.handler(async ({ context, input, errors }) => {
+			const userId = context.user.id;
+			// Slugs are unique per user, so the slug doubles as the idempotency record:
+			// no schema change, and a retry can always find the first call's resume.
+			const slug = `gb-${input.requestId.toLowerCase()}`;
+
+			const existingId = await resumeService.getIdBySlugForUser({ slug, userId });
+			if (existingId) return { id: existingId, created: false };
+
+			let data: ResumeData;
+			try {
+				data = parseJSONResume(JSON.stringify(input.resume));
+			} catch (error) {
+				throw errors.INVALID_JSON_RESUME({
+					...(error instanceof Error ? { message: error.message } : {}),
+					cause: error,
+				});
+			}
+
+			const id = generateId();
+
+			try {
+				await resumeService.create({
+					id,
+					name: input.name ?? generateRandomName(),
+					slug,
+					tags: [],
+					data,
+					locale: context.locale,
+					userId,
+				});
+			} catch (error) {
+				// A concurrent call with the same requestId inserted first.
+				if (error instanceof ORPCError && error.code === "RESUME_SLUG_ALREADY_EXISTS") {
+					const winnerId = await resumeService.getIdBySlugForUser({ slug, userId });
+					if (winnerId) return { id: winnerId, created: false };
+				}
+				throw error;
+			}
+
+			await resumeService.versions.snapshot({ resumeId: id, userId, data, label: "Imported" });
+
+			return { id, created: true };
 		}),
 
 	update: protectedProcedure

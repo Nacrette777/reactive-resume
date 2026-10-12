@@ -512,6 +512,17 @@ export const resumeService = {
 		return resume;
 	},
 
+	/** ID of the owner's resume with this slug, or null. Slugs are unique per user. */
+	getIdBySlugForUser: async (input: { slug: string; userId: string }): Promise<string | null> => {
+		const [resume] = await db
+			.select({ id: schema.resume.id })
+			.from(schema.resume)
+			.where(and(eq(schema.resume.slug, input.slug), eq(schema.resume.userId, input.userId)))
+			.limit(1);
+
+		return resume?.id ?? null;
+	},
+
 	getBySlug: async (input: {
 		username: string;
 		slug: string;

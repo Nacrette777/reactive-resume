@@ -60,6 +60,32 @@ export const resumeDto = {
 		output: z.string().describe("The ID of the imported resume."),
 	},
 
+	importJsonResume: {
+		input: z.object({
+			requestId: z
+				.uuid()
+				.describe(
+					"Caller-chosen idempotency key. Retrying with the same key returns the resume created by the first call instead of creating another one.",
+				),
+			name: z
+				.string()
+				.trim()
+				.min(1)
+				.max(64)
+				.optional()
+				.describe("The name of the resume. A random name is generated when omitted."),
+			resume: z
+				.record(z.string(), z.unknown())
+				.describe("A standard JSON Resume document (https://jsonresume.org/schema)."),
+		}),
+		output: z.object({
+			id: z.string().describe("The ID of the imported resume."),
+			created: z
+				.boolean()
+				.describe("False when an earlier call with the same requestId had already created the resume."),
+		}),
+	},
+
 	update: {
 		input: resumeSchema
 			.pick({ name: true, slug: true, tags: true, data: true, isPublic: true, showDownloadButtons: true })

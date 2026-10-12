@@ -6,6 +6,7 @@ import { defaultResumeData } from "@reactive-resume/schema/resume/default";
 const mocks = vi.hoisted(() => ({
 	create: vi.fn(),
 	getById: vi.fn(),
+	getIdBySlugForUser: vi.fn(),
 	update: vi.fn(),
 	snapshot: vi.fn(),
 }));
@@ -25,6 +26,7 @@ vi.mock("./service", () => ({
 	resumeService: {
 		create: mocks.create,
 		getById: mocks.getById,
+		getIdBySlugForUser: mocks.getIdBySlugForUser,
 		update: mocks.update,
 		versions: { snapshot: mocks.snapshot },
 	},
@@ -129,4 +131,86 @@ describe("resume sharing update route", () => {
 			expect(result.showDownloadButtons).toBe(showDownloadButtons);
 		},
 	);
+});
+
+describe("resume importJsonResume route", () => {
+	const requestId = "0b8e3c1a-5f2d-4e7b-9a6c-1d2e3f4a5b6c";
+	const jsonResume = {
+		basics: { name: "Test Student", email: "student@example.test", label: "Data Analyst" },
+		education: [{ institution: "Test University", studyType: "Bachelor", area: "Computer Science" }],
+		skills: [{ name: "SQL", level: "Advanced" }],
+	};
+
+	const client = () =>
+		createRouterClient(crudRouter, {
+			context: { locale: "en-US", reqHeaders: new Headers(), user: { id: "user-id" } } as never,
+		});
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mocks.getIdBySlugForUser.mockResolvedValue(null);
+		mocks.create.mockResolvedValue("new-id");
+		mocks.snapshot.mockResolvedValue(undefined);
+	});
+
+	it("converts the JSON Resume and creates a resume under a requestId-derived slug", async () => {
+		const result = await client().importJsonResume({ requestId, name: "GradBridge draft", resume: jsonResume });
+
+		expect(result).toEqual({ id: expect.any(String), created: true });
+		expect(mocks.create).toHaveBeenCalledTimes(1);
+		const created = mocks.create.mock.calls[0]?.[0];
+		expect(created).toMatchObject({
+			id: result.id,
+			name: "GradBridge draft",
+			slug: `gb-${requestId}`,
+			userId: "user-id",
+			tags: [],
+		});
+		expect(created.data.basics.name).toBe("Test Student");
+		expect(created.data.basics.headline).toBe("Data Analyst");
+		expect(mocks.snapshot).toHaveBeenCalledWith(
+			expect.objectContaining({ resumeId: result.id, userId: "user-id", label: "Imported" }),
+		);
+	});
+
+	it("returns the existing resume when the same requestId is retried", async () => {
+		mocks.getIdBySlugForUser.mockResolvedValue("existing-id");
+
+		const result = await client().importJsonResume({ requestId, resume: jsonResume });
+
+		expect(result).toEqual({ id: "existing-id", created: false });
+		expect(mocks.getIdBySlugForUser).toHaveBeenCalledWith({ slug: `gb-${requestId}`, userId: "user-id" });
+		expect(mocks.create).not.toHaveBeenCalled();
+		expect(mocks.snapshot).not.toHaveBeenCalled();
+	});
+
+	it("returns the winner's resume when a concurrent call with the same requestId inserted first", async () => {
+		const { ORPCError } = await import("@orpc/server");
+		mocks.getIdBySlugForUser.mockResolvedValueOnce(null).mockResolvedValueOnce("winner-id");
+		mocks.create.mockRejectedValue(new ORPCError("RESUME_SLUG_ALREADY_EXISTS", { status: 400 }));
+
+		const result = await client().importJsonResume({ requestId, resume: jsonResume });
+
+		expect(result).toEqual({ id: "winner-id", created: false });
+		expect(mocks.snapshot).not.toHaveBeenCalled();
+	});
+
+	it("rejects a document that is not a valid JSON Resume without creating anything", async () => {
+		const error = await client()
+			.importJsonResume({ requestId, resume: { basics: "not an object" } })
+			.catch((caught: unknown) => caught);
+
+		expect(error).toMatchObject({ code: "INVALID_JSON_RESUME", status: 400 });
+		expect(mocks.create).not.toHaveBeenCalled();
+	});
+
+	it("requires the requestId to be a UUID", async () => {
+		const error = await client()
+			.importJsonResume({ requestId: "not-a-uuid", resume: jsonResume })
+			.catch((caught: unknown) => caught);
+
+		expect(error).toMatchObject({ code: "BAD_REQUEST" });
+		expect(mocks.getIdBySlugForUser).not.toHaveBeenCalled();
+		expect(mocks.create).not.toHaveBeenCalled();
+	});
 });
