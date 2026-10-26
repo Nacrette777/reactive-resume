@@ -1,5 +1,5 @@
 import type { ResumeData } from "@reactive-resume/schema/resume/data";
-import { ORPCError } from "@orpc/server";
+import { createHash } from "node:crypto";
 import { parseJSONResume } from "@reactive-resume/import/json-resume";
 import { generateId, generateRandomName, slugify } from "@reactive-resume/utils/string";
 import { protectedProcedure } from "../../context";
@@ -8,6 +8,18 @@ import { resumeMutationRateLimit } from "../../middleware/rate-limit";
 import { createResumeData } from "./initial-data";
 import { parseStoredResumeData } from "./resume-data-validation";
 import { resumeService } from "./service";
+
+// JSON with object keys sorted, so the same document always hashes the same however it was serialized.
+function canonicalJson(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+	if (value && typeof value === "object") {
+		const entries = Object.entries(value as Record<string, unknown>)
+			.filter(([, item]) => item !== undefined)
+			.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+		return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
+	}
+	return JSON.stringify(value);
+}
 
 export const crudRouter = {
 	list: protectedProcedure
@@ -136,7 +148,7 @@ export const crudRouter = {
 			operationId: "importJsonResume",
 			summary: "Import a JSON Resume document",
 			description:
-				"Creates a new resume from a standard JSON Resume document, converted on the server with the same importer the web app uses. The caller supplies a requestId: retrying with the same requestId returns the resume created by the first call instead of creating another one. Returns the ID of the resume and whether this call created it. Requires authentication.",
+				"Creates a new resume from a standard JSON Resume document, converted on the server with the same importer the web app uses. The caller supplies a requestId: retrying with the same requestId returns the resume created by the first call instead of creating another one, even if that resume has since been renamed. A retry is refused when the first call's resume has been deleted (410) or when the document differs from the first call's (409). Returns the ID of the resume and whether this call created it. Requires authentication.",
 			successDescription: "The ID of the imported resume and whether this call created it.",
 		})
 		.input(resumeDto.importJsonResume.input)
@@ -147,15 +159,36 @@ export const crudRouter = {
 				message: "The document could not be read as a valid JSON Resume.",
 				status: 400,
 			},
+			IMPORT_REQUEST_MISMATCH: {
+				message: "This requestId was already used to import a different document.",
+				status: 409,
+			},
+			IMPORT_TARGET_DELETED: {
+				message: "The resume created for this requestId has since been deleted. Use a new requestId to import again.",
+				status: 410,
+			},
+			IMPORT_SLUG_TAKEN: {
+				message: "Another resume already uses the slug reserved for this requestId.",
+				status: 409,
+			},
 		})
 		.handler(async ({ context, input, errors }) => {
 			const userId = context.user.id;
-			// Slugs are unique per user, so the slug doubles as the idempotency record:
-			// no schema change, and a retry can always find the first call's resume.
-			const slug = `gb-${input.requestId.toLowerCase()}`;
+			const requestId = input.requestId.toLowerCase();
+			const payloadSha256 = createHash("sha256").update(canonicalJson(input.resume)).digest("hex");
 
-			const existingId = await resumeService.getIdBySlugForUser({ slug, userId });
-			if (existingId) return { id: existingId, created: false };
+			// Retries are matched on (owner, requestId) in resume_import_request, never on the editable
+			// slug, so renaming the resume or its slug cannot make a retry create a second one.
+			const replay = (request: { resumeId: string | null; payloadSha256: string | null }) => {
+				if (request.payloadSha256 && request.payloadSha256 !== payloadSha256) {
+					throw errors.IMPORT_REQUEST_MISMATCH();
+				}
+				if (!request.resumeId) throw errors.IMPORT_TARGET_DELETED();
+				return { id: request.resumeId, created: false };
+			};
+
+			const existing = await resumeService.importRequests.find({ userId, requestId });
+			if (existing) return replay(existing);
 
 			let data: ResumeData;
 			try {
@@ -167,30 +200,22 @@ export const crudRouter = {
 				});
 			}
 
-			const id = generateId();
+			const id = await resumeService.importRequests.createResume({
+				userId,
+				requestId,
+				payloadSha256,
+				name: input.name ?? generateRandomName(),
+				slug: `gb-${requestId}`,
+				locale: context.locale,
+				data,
+			});
+			if (id) return { id, created: true };
 
-			try {
-				await resumeService.create({
-					id,
-					name: input.name ?? generateRandomName(),
-					slug,
-					tags: [],
-					data,
-					locale: context.locale,
-					userId,
-				});
-			} catch (error) {
-				// A concurrent call with the same requestId inserted first.
-				if (error instanceof ORPCError && error.code === "RESUME_SLUG_ALREADY_EXISTS") {
-					const winnerId = await resumeService.getIdBySlugForUser({ slug, userId });
-					if (winnerId) return { id: winnerId, created: false };
-				}
-				throw error;
-			}
-
-			await resumeService.versions.snapshot({ resumeId: id, userId, data, label: "Imported" });
-
-			return { id, created: true };
+			// A concurrent call with the same requestId committed first: answer with its resume.
+			const winner = await resumeService.importRequests.find({ userId, requestId });
+			if (winner) return replay(winner);
+			// Otherwise the owner gave another resume the slug reserved for this request.
+			throw errors.IMPORT_SLUG_TAKEN();
 		}),
 
 	update: protectedProcedure

@@ -512,15 +512,87 @@ export const resumeService = {
 		return resume;
 	},
 
-	/** ID of the owner's resume with this slug, or null. Slugs are unique per user. */
-	getIdBySlugForUser: async (input: { slug: string; userId: string }): Promise<string | null> => {
-		const [resume] = await db
-			.select({ id: schema.resume.id })
-			.from(schema.resume)
-			.where(and(eq(schema.resume.slug, input.slug), eq(schema.resume.userId, input.userId)))
-			.limit(1);
+	importRequests: {
+		/** The owner's import request with this requestId, or null. resumeId is null once that resume was deleted. */
+		find: async (input: {
+			userId: string;
+			requestId: string;
+		}): Promise<{ resumeId: string | null; payloadSha256: string | null } | null> => {
+			const [request] = await db
+				.select({
+					resumeId: schema.resumeImportRequest.resumeId,
+					payloadSha256: schema.resumeImportRequest.payloadSha256,
+				})
+				.from(schema.resumeImportRequest)
+				.where(
+					and(
+						eq(schema.resumeImportRequest.userId, input.userId),
+						eq(schema.resumeImportRequest.requestId, input.requestId),
+					),
+				)
+				.limit(1);
 
-		return resume?.id ?? null;
+			return request ?? null;
+		},
+
+		/**
+		 * Creates the resume, its first version and the import record in one transaction. Returns null,
+		 * having written nothing, when a concurrent call with the same requestId committed first.
+		 */
+		createResume: async (input: {
+			userId: string;
+			requestId: string;
+			payloadSha256: string;
+			name: string;
+			slug: string;
+			locale: Locale;
+			data: ResumeData;
+		}): Promise<string | null> => {
+			const id = generateId();
+			const data = parseWritableResumeData(structuredClone(input.data));
+			data.metadata.page.locale = input.locale;
+
+			try {
+				await db.transaction(async (tx) => {
+					await tx.insert(schema.resume).values({
+						id,
+						name: input.name,
+						slug: input.slug,
+						tags: [],
+						userId: input.userId,
+						data,
+					});
+					await tx.insert(schema.resumeImportRequest).values({
+						userId: input.userId,
+						requestId: input.requestId,
+						resumeId: id,
+						payloadSha256: input.payloadSha256,
+					});
+					await writeResumeVersion(tx, { resumeId: id, userId: input.userId, data, label: "Imported" });
+				});
+			} catch (error) {
+				const constraint = get(error, "cause.constraint") as string | undefined;
+				if (
+					constraint === "resume_import_request_user_id_request_id_unique" ||
+					constraint === "resume_slug_user_id_unique"
+				) {
+					return null;
+				}
+
+				console.error("Failed to import resume:", error);
+				throw new ORPCError("INTERNAL_SERVER_ERROR", { message: "Failed to import resume" });
+			}
+
+			await notifyResumeUpdated({
+				type: "resume.updated",
+				resumeId: id,
+				userId: input.userId,
+				updatedAt: new Date().toISOString(),
+				mutation: "create",
+			});
+
+			return id;
+		},
 	},
 
 	getBySlug: async (input: {
