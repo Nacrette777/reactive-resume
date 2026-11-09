@@ -23,6 +23,7 @@ export const resumeRouter = {
 	getBySlug: sharingRouter.getBySlug,
 	create: crudRouter.create,
 	import: crudRouter.import,
+	importJsonResume: crudRouter.importJsonResume,
 	update: crudRouter.update,
 	patch: crudRouter.patch,
 	setLocked: crudRouter.setLocked,

@@ -49,6 +49,8 @@ const oauthAudienceBase = authBaseUrl.replace(/\/$/, "");
 // These identify the same account-wide API/MCP resource, not separate permission
 // tiers. Protected-resource metadata advertises the root; MCP clients may also
 // select the mounted endpoint or normalize either URI with a trailing slash.
+export const OAUTH_REFRESH_TOKEN_REUSE_INTERVAL_SECONDS = 60;
+
 const OAUTH_AUDIENCES = [
 	oauthAudienceBase,
 	`${oauthAudienceBase}/`,
@@ -307,6 +309,11 @@ const getAuthConfig = () => {
 				consentPage: "/auth/consent",
 				resources: OAUTH_AUDIENCES,
 				clientRegistrationDefaultResources: OAUTH_AUDIENCES,
+				// Refresh tokens rotate on every use and reuse revokes the whole family. If a
+				// refresh succeeds here but the response never reaches the client (timeout,
+				// dropped connection), its retry would present the old token and lose the
+				// grant. Inside this window Better Auth replays the same response instead.
+				refreshTokenReuseInterval: OAUTH_REFRESH_TOKEN_REUSE_INTERVAL_SECONDS,
 				allowDynamicClientRegistration: true,
 				// Required for MCP client onboarding (RFC 7591). Redirect URI validation
 				// and explicit user consent protect access by dynamically registered clients.

@@ -67,6 +67,30 @@ export const resumeVersion = pg.pgTable(
 	(t) => [pg.index().on(t.resumeId, t.createdAt.desc())],
 );
 
+// Idempotency record for API imports: one row per (owner, caller-chosen requestId). Retries are
+// matched here rather than by slug, which the owner can edit. Deleting the resume keeps the row
+// with a null resumeId, so a late retry is answered "deleted" instead of creating a new resume.
+export const resumeImportRequest = pg.pgTable(
+	"resume_import_request",
+	{
+		id: pg
+			.text("id")
+			.notNull()
+			.primaryKey()
+			.$defaultFn(() => generateId()),
+		userId: pg
+			.text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		requestId: pg.text("request_id").notNull(),
+		resumeId: pg.text("resume_id").references(() => resume.id, { onDelete: "set null" }),
+		// SHA-256 of the imported document (canonical JSON). Null for rows backfilled from older imports.
+		payloadSha256: pg.text("payload_sha256"),
+		createdAt: pg.timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+	},
+	(t) => [pg.unique().on(t.userId, t.requestId), pg.index().on(t.resumeId)],
+);
+
 export const resumeStatistics = pg.pgTable("resume_statistics", {
 	id: pg
 		.text("id")

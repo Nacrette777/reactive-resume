@@ -878,6 +878,9 @@ importers:
       '@reactive-resume/env':
         specifier: workspace:*
         version: link:../env
+      '@reactive-resume/import':
+        specifier: workspace:*
+        version: link:../import
       '@reactive-resume/pdf':
         specifier: workspace:*
         version: link:../pdf

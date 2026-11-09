@@ -42,6 +42,7 @@
 		"@reactive-resume/auth": "workspace:*",
 		"@reactive-resume/db": "workspace:*",
 		"@reactive-resume/env": "workspace:*",
+		"@reactive-resume/import": "workspace:*",
 		"@reactive-resume/pdf": "workspace:*",
 		"@reactive-resume/resume": "workspace:*",
 		"@reactive-resume/schema": "workspace:*",
